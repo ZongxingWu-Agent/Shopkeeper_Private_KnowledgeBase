@@ -29,17 +29,6 @@ from app.utils.rate_limit_utils import apply_api_rate_limit
 # 提示词加载工具
 from app.core.load_prompt import load_prompt
 
-# MinIO支持的图片格式集合（小写后缀，统一匹配标准）
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-
-
-def is_supported_image(filename: str) -> bool:
-    """
-    判断文件是否为MinIO支持的图片格式（后缀不区分大小写）
-    :param filename: 文件名（含后缀）
-    :return: 支持返回True，否则False
-    """
-    return os.path.splitext(filename)[1].lower() in IMAGE_EXTENSIONS
 
 
 """
@@ -70,10 +59,22 @@ def is_supported_image(filename: str) -> bool:
     return state
 """
 
+# MinIO支持的图片格式集合（小写后缀，统一匹配标准）
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+def is_supported_image(filename: str) -> bool:
+    """
+    判断文件是否为MinIO支持的图片格式（后缀不区分大小写）
+    这部分定义了一个白名单（.jpg, .png 等）。当侦探看到一个文件时，先查验它到底是不是真正的图片。
+    :param filename: 文件名（含后缀）
+    :return: 支持返回True，否则False
+    """
+    return os.path.splitext(filename)[1].lower() in IMAGE_EXTENSIONS
+
 
 def step_1_get_content(state: ImportGraphState) -> Tuple[str, Path, Path]:
     """
     提取内容
+    检查文件到底在不在，把 Markdown 的文本内容读到内存里，并且定位存放图片的 images 文件夹在哪
     :param state:
     :return:
     """
@@ -90,8 +91,15 @@ def step_1_get_content(state: ImportGraphState) -> Tuple[str, Path, Path]:
     if not state['md_content']:
         # 没有，再读取！ 有，证明是pdf节点解析过来的，已经给md_content进行赋值了！
         with md_path_obj.open("r", encoding="utf-8") as f:
+            # 将所有文字内容打包成一个大字符串赋值给md_content
             md_content = f.read()
         state['md_content'] = md_content
+        """
+        关于with的拆解步骤
+        f = md_path_obj.open("r")  # 1. 找管理员借出古籍
+        md_content = f.read()      # 2. 阅读并抄写里面的内容
+        f.close()                  # 3. 必须手动把古籍还给管理员！
+        """
 
     # 图片文件夹obj
     # 注意：自己传入的md -》 你的图片文件夹也必须交 images
@@ -101,14 +109,15 @@ def step_1_get_content(state: ImportGraphState) -> Tuple[str, Path, Path]:
 
 def find_image_in_md_content(md_content, image_file, context_length: int = 100):
     """
+      拿着图片的名字，去茫茫的 Markdown 文本里用正则表达式搜索
+      找到这个图片被插入的具体位置，并向前、向后各截取 100 个字符
     从md_content识别图片的上下文！
     约定上下文长度100
     :param md_content:
-    :param image_file:
+    :param image_file: cat.png
     :param context_length：默认截取长度
-    :return:
+    :return:result：[(上文),(下文)]
     """
-
     """
     # 你好啊
     我很好，还有7行代码今天就结束了！小伙伴们坚持好！谢谢！
@@ -120,37 +129,49 @@ def find_image_in_md_content(md_content, image_file, context_length: int = 100):
     巴巴爸爸
     ![二大爷](/xxx/xx/zhaoweifeng.jpgxxx)
     嘿嘿额
-
     file_name zhaoweifeng.jpg
     """
     # 定义正则表达式  .*  .*?
+    # r -> 不要把它们当成普通的换行符或转义符给吞了
+    # 给个模版（通缉令）
     pattern = re.compile(r"!\[.*?\]\(.*?" + image_file + ".*?\)")
 
     results = []  # 存储图片多处使用，上下文不同 ！ 本次暴力处理，获取第一个！
     # 查询符合位置
+    # 拿着模版去md_content中找出现的位置
+    # 注意：finditer不会找到一个就停下，此处写死只要第一个
+    # pattern.finditer->执行结果： 它找到了两个目标，排成了队伍交给 for 循环：
+         # 1号目标：![大猫](cat.png)
+         # 2号目标：![小猫](cat.png)
     for item in pattern.finditer(md_content):
         start, end = item.span()  # span获取匹配对象的起始和终止的位置
         # 截取上文
         pre_text = md_content[max(start - context_length, 0):start]  # 考虑前面有没有context_length 没有从0开始
         post_text = md_content[end:min(end + context_length, len(md_content))]  # 考虑后面有没有context_length 没有就到长度
         # 截取下文
+        # results->列表变成了：[("我看到", "在睡觉。")]
         results.append((pre_text, post_text))
     # 截取位置前后的内容
     if results:
         logger.info(f"图片：{image_file} ,在{md_content[:100]}中使用了：{len(results)}次，截取第一个上下文：{results[0]}")
+        # 返回第一个上下文[("我看到", "在睡觉。")]
         return results[0]
 
 
 def step_2_scan_images(md_content: str, images_dir_obj: Path) -> List[Tuple[str, str, Tuple[str, str]]]:
     """
     进行md中图片识别，并且截取图片对应的上下文环境
+    把 images 文件夹里的图片一张张拿出来，调用上面的勘探方法。
+    最后生成一份清单（包含图片名、路径、上下文）
     :param md_content:
     :param images_dir_obj:
-    :return:  [(图片名，图片地址，上下元组())]
+    :return: [(图片名，图片地址，上下元组())]
     """
     # 1. 我们先创建一个目标集合
     targets = []
     # 2. 循环读取images中的所有图片，校验在md中是否使用，使用了就截取上下文
+    # 列出指定文件夹里面所有的文件和子文件夹的名称。
+    # os.listdir()->['cat.png', 'dog.jpg', 'readme.txt', '新文件夹']
     for image_file in os.listdir(images_dir_obj):
         # 遍历每个文件的名字
         # 检查图片是否可用 -》 图片
@@ -163,6 +184,8 @@ def step_2_scan_images(md_content: str, images_dir_obj: Path) -> List[Tuple[str,
         if not content_data:
             logger.warning(f"图片：{image_file}没有在md内容使用！上下文为空！")
             continue
+                        # [(图片名，图片地址，上下文元组(上文，下文))]
+                                      # Path("D:/项目/images") / "cat.png" -> Path("D:/项目/images/cat.png")
         targets.append((image_file, str(images_dir_obj / image_file), content_data))
 
     return targets
@@ -190,7 +213,7 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
         logger.info(f">>> [{function_name}]没有图片，直接返回 state ！")
         return state
     # 2. 识别md中使用过的图片，采取做下一步（进行图片总结）
-    # [(图片名,图片地址,(上文,下文 = 100))]
+    # [(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))]
     targets = step_2_scan_images(md_content, images_dir_obj)
     #         参数： 1. md_content 2. images图片的文件夹地址
     #         响应： [(图片名,图片地址,(上文,下文))]
