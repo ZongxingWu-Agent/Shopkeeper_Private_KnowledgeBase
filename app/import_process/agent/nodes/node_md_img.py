@@ -199,111 +199,127 @@ def step_2_scan_images(md_content: str, images_dir_obj: Path) -> List[Tuple[str,
     return targets
 
 
-def step_3_generate_img_summaries(targets, stem):
-    """
-    获取图片的内容描述！ 利用视觉模型！
-    :param targets: [(图片名.xxx,图片地址,(上文,下文))，(图片名.xxx,图片地址,(上文,下文))]
-    :param stem:  文件夹的名字  md名称 output / h180xxxx /  h180xxxx.md  | images
-    :return: {图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 ,图片名.xx : 总结和描述....}
-    """
-    summaries = {} # 最终结果
-    # 循环每一张图片，向视觉模型进行请求，获取总结结果！
-    # 确保一个对类对象就行了！！！
-    request_times = deque()
-    for image_file,image_path, context in  targets:
-        # 解构 图片名 图片地址 (上,下)
-        # 1. 访问限速问题（我们模型的限速标准 1分钟 可以访问10  限制并发访问次数..）
-        apply_api_rate_limit(request_times, max_requests=9)
-        # 2. 向视觉模型发起请求
-        # 2.1 模型对象
-        vm_model = get_llm_client(model=lm_config.lv_model)
-        # 2.2 准备提示词
-        # 加载了提示词模版并格式化了提示词
-        prompt = load_prompt("image_summary",root_folder=stem,image_content=context)
-
-        # import base64
-        with open(image_path, "rb") as f:
-            image_base64 = base64.b64encode(f.read()).decode("utf-8")  # 字节转成字符
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            # 直接放图片的网络地址 "url": "https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241022/emyrja/dog_and_girl.jpeg"
-                            # base64图片转后的字符串  jpg -> image/jpeg
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": f"{prompt}"
-                    },
-                ],
-            },
-        ]
-        # 2.3 执行获取总结
-        response = vm_model.invoke(messages)
-        summary = response.content.strip().replace("\n","")
-        summaries[image_file] = summary
-        logger.info(f"图片：{image_file}，总结结果：{summary}")
-    logger.info(f"总结图片，获取结果：{summaries}")
-    return summaries
-
-
-# def step_3_generate_img_summaries_langchain(targets, stem):
+# def step_3_generate_img_summaries(targets, stem):
 #     """
-#     使用 LangChain 流水线重构的图片总结函数
+#     获取图片的内容描述！ 利用视觉模型！
+#     :param targets: [(图片名.xxx,图片地址,(上文,下文))，(图片名.xxx,图片地址,(上文,下文))]
+#     :param stem:  文件夹的名字  md名称 output / h180xxxx /  h180xxxx.md  | images
+#     :return: {图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 ,图片名.xx : 总结和描述....}
 #     """
-#     summaries = {}
+#     # 准备了一个空的字典 summaries，用来当做最后的“鉴定报告汇总表”
+#     summaries = {} # 最终结果
+#     # 循环每一张图片，向视觉模型进行请求，获取总结结果！
+#     # 确保一个对类对象就行了！！！
+#     # 名为 request_times 的队列，用来记录每次发请求的时间
 #     request_times = deque()
-#
-#     # 【亮点 1：在循环外，提前搭建好一条固定的“处理流水线”】
-#
-#     # 1. 制造“模具”：定义好包含图片和文字的结构化消息模板
-#     chat_template = ChatPromptTemplate.from_messages([
-#         ("user", [
-#             # 告诉 LangChain 这里有个坑位叫 img_base64，它是一张图片
-#             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,{img_base64}"}},
-#             # 告诉 LangChain 这里有个坑位叫 text_prompt，它是一段文字
-#             {"type": "text", "text": "{text_prompt}"}
-#         ])
-#     ])
-#
-#     # 2. 请出专家
-#     vm_model = get_llm_client(model=lm_config.lv_model)
-#
-#     # 3. 拼装传送带 (LCEL语法)： 模板拼装 -> 交给大模型 -> 自动提取纯文本
-#     # 这里的 `|` 就像水管一样，把三个组件连了起来
-#     chain = chat_template | vm_model | StrOutputParser()
-#
-#     # 开始批量处理物证
-#     for image_file, image_path, context in targets:
+#     for image_file,image_path, context in  targets:
+#         # 解构 图片名 图片地址 (上,下)
+#         # 1. 访问限速问题（我们模型的限速标准 1分钟 可以访问10  限制并发访问次数..）
 #         apply_api_rate_limit(request_times, max_requests=9)
+#         # 2. 向视觉模型发起请求
+#         # 2.1 模型对象
+#         vm_model = get_llm_client(model=lm_config.lv_model)
+#         # 2.2 准备提示词
+#         # 加载了提示词模版并格式化了提示词
+#         # 此时 prompt 变成了一段极其具体的纯文本指令：
+#         #"你是一个图片分析专家。当前图片出自文件夹【hak180产品安全手册】。上下文是：【操作机器前请注意，否则可能引起烫伤。】。请你总结一下这张图片画了什么。"
+#         prompt = load_prompt("image_summary",root_folder=stem,image_content=context)
 #
-#         # 准备材料 1：将图片转为 base64 乱码
+#         # import base64
 #         with open(image_path, "rb") as f:
-#             image_base64 = base64.b64encode(f.read()).decode("utf-8")
+#             #AI 专家远在云端，你不能直接顺着网线把 D 盘里的图片硬塞给它。
+#             # 所以，代码以只读二进制模式（"rb"）打开图片，然后用 base64 技术，将整张图片的像素数据强制编码成一串极其漫长的“乱码字符串”
+#             # image_base64 = "iVBORw0KGgoAAAANSUhEUgAA..."（省略几万字）
+#             image_base64 = base64.b64encode(f.read()).decode("utf-8")  # 字节转成字符
 #
-#         # 准备材料 2：继续使用你们优雅的 load_prompt 加载外部文字话术
-#         text_prompt = load_prompt("image_summary", root_folder=stem, image_content=context)
-#
-#         # 【亮点 2：一键启动流水线】
-#         # 把两样材料作为字典扔进流水线，连 messages 列表都不用自己手写了！
-#         summary = chain.invoke({
-#             "img_base64": image_base64,
-#             "text_prompt": text_prompt
-#         })
-#
-#         # 此时得到的 summary 已经是干净的字符串了，只需要简单去个回车
-#         summary = summary.strip().replace("\n", "")
+#         messages = [
+#             {
+#                 "role": "user",
+#                 "content": [
+#                     {
+#                         "type": "image_url",
+#                         "image_url": {
+#                             # 直接放图片的网络地址 "url": "https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241022/emyrja/dog_and_girl.jpeg"
+#                             # base64图片转后的字符串  jpg -> image/jpeg
+#                             "url": f"data:image/jpeg;base64,{image_base64}"
+#                         },
+#                     },
+#                     {
+#                         "type": "text",
+#                         "text": f"{prompt}"
+#                     },
+#                 ],
+#             },
+#         ]
+#         # 2.3 执行获取总结
+#         # 假设 AI 看完图片和“防烫伤”的上下文后，返回的原始文本是:
+#         # response->"\n图中是一个红色的三角形警告标志，中间画着一双正在冒烟的手。 \n"
+#         response = vm_model.invoke(messages)
+#         # summary->"图中是一个红色的三角形警告标志，中间画着一双正在冒烟的手。"
+#         summary = response.content.strip().replace("\n","")
+#         # summaries 字典现在变成了：
+#         # {
+#         #     "warning.png": "图中是一个红色的三角形警告标志，中间画着一双正在冒烟的手。",
+#         #     "machine_front.jpg": "产品正面外观图，展示了电源按钮和显示屏的位置。",
+#         #     ...
+#         # }
 #         summaries[image_file] = summary
 #         logger.info(f"图片：{image_file}，总结结果：{summary}")
-#
 #     logger.info(f"总结图片，获取结果：{summaries}")
 #     return summaries
+
+
+def step_3_generate_img_summaries(targets, stem):
+    """
+    使用 LangChain 流水线重构的图片总结函数
+    """
+    summaries = {}
+    request_times = deque()
+
+    # 【亮点 1：在循环外，提前搭建好一条固定的“处理流水线”】
+
+    # 1. 制造“模具”：定义好包含图片和文字的结构化消息模板
+    chat_template = ChatPromptTemplate.from_messages([
+        ("user", [
+            # 告诉 LangChain 这里有个坑位叫 img_base64，它是一张图片
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,{img_base64}"}},
+            # 告诉 LangChain 这里有个坑位叫 text_prompt，它是一段文字
+            {"type": "text", "text": "{text_prompt}"}
+        ])
+    ])
+
+    # 2. 请出专家
+    vm_model = get_llm_client(model=lm_config.lv_model)
+
+    # 3. 拼装传送带 (LCEL语法)： 模板拼装 -> 交给大模型 -> 自动提取纯文本
+    # 这里的 `|` 就像水管一样，把三个组件连了起来
+    chain = chat_template | vm_model | StrOutputParser()
+
+    # 开始批量处理物证
+    for image_file, image_path, context in targets:
+        apply_api_rate_limit(request_times, max_requests=9)
+
+        # 准备材料 1：将图片转为 base64 乱码
+        with open(image_path, "rb") as f:
+            image_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # 准备材料 2：继续使用你们优雅的 load_prompt 加载外部文字话术
+        text_prompt = load_prompt("image_summary", root_folder=stem, image_content=context)
+
+        # 【亮点 2：一键启动流水线】
+        # 把两样材料作为字典扔进流水线，连 messages 列表都不用自己手写了！
+        summary = chain.invoke({
+            "img_base64": image_base64,
+            "text_prompt": text_prompt
+        })
+
+        # 此时得到的 summary 已经是干净的字符串了，只需要简单去个回车
+        summary = summary.strip().replace("\n", "")
+        summaries[image_file] = summary
+        logger.info(f"图片：{image_file}，总结结果：{summary}")
+
+    logger.info(f"总结图片，获取结果：{summaries}")
+    return summaries
 
 def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
     """
@@ -321,6 +337,11 @@ def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
     # 1.1 获取要删除的对象
     # Object object_name
     # 注意：{minio_config.minio_img_dir[1:]}  一定要去掉一个 /
+    """总管家带着案卷代号 "hak180产品安全手册"，
+    去 MinIO 仓库里找对应的专属货架（prefix 路径）。
+    把货架上旧的 warning.png 统统打包到 delete_object_list 垃圾袋里，
+    直接一把火烧掉（remove_objects）。打扫出一个干干净净的新货架
+    """
     object_list = minio_client.list_objects(minio_config.bucket_name,
                               prefix= f"{minio_config.minio_img_dir[1:]}/{stem}",
                               recursive=True)
@@ -336,6 +357,9 @@ def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
 
     # 2. 上传图片到minio服务器
     # 声明记录图片上传结果的字典
+
+    # images_url 变成了：
+    # {"warning.png": "http://192.168.1.100:9000/bucket/upload-images/hak180产品安全手册/warning.png"}
     images_url = {}
     # targets:  （图片名，原地址，（上，下））
     for image_file,image_path, _ in targets:
@@ -352,10 +376,14 @@ def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
             logger.info(f"完成图片{image_file}上传，访问地址为：{images_url[image_file]}")
         except Exception as e:
             logger.error(f"上传图片失败：{image_file}，失败原因：{e}")
+
     # 3. md中图片的替换即可
     # summaries = 图片名: 描述
     # images_url= 图片名：url地址
     # 汇总： {图片名:(描述,url地址)}
+
+    #image_infos 变成了终极替换清单：
+    # {"warning.png": ("图中是一个红色的三角形警告标志...", "http://192.168.1.100:9000/.../warning.png")}
     image_infos = {}
     for image_file, summary in summaries.items():
         if url := images_url.get(image_file):
@@ -368,12 +396,24 @@ def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
         xxx  ![xx](图片地址/image_file) -> ![summary](minio的url)
         xxx
         """
+        """
+        rep.sub(新文本, 旧长文) 就像是 Word 里的“全部替换”功能。它扫描整篇 md_content：
+        发现了旧代码：![原本的废话](/images/warning.png)。
+        咔嚓一下！把它生生抠掉。
+        换成：![图中是一个红色的三角形警告标志...](http://192.168.1.100:9000/.../warning.png)
+        """
         for image_file, (summary, url) in image_infos.items():
             # 使用正则
             # ![](/xxx/xx/image_file) -> ![无所谓](无所谓image_file无所谓)
             rep = re.compile(r"!\[.*?\]\(.*?"+image_file+".*?\)")
             md_content = rep.sub(f"![{summary}]({url})", md_content)
         logger.info(f"已经完成md内容的替换，新的内容为:{md_content}")
+
+    """
+    函数执行完毕后，原本残缺不全、带有很多本地死链接的 md_content，
+    华丽转身变成了完美适配 AI 时代的新文本md_content返回去:
+    "...操作机器前请注意![图中是一个红色的三角形警告标志，中间画着一双正在冒烟的手。](http://192.168.1.100:9000/bucket/upload-images/hak180产品安全手册/warning.png)，否则可能引起烫伤。..."
+    """
     return md_content
 
 
@@ -388,9 +428,16 @@ def step_5_replace_md_and_save(new_md_content, md_path_obj):
     # 设置下新的地址
     #   c:/xxx/xxx/xxx/xxxx/erdaye.md -> splitext(md_path_obj)[0]
     #   -》 c:/xxx/xxx/xxx/xxxx/erdaye _new.md
+    # 给新报告起个新名字 (os.path.splitext)
+    # 系统在生成新文件时，为了不破坏原始文件（保留底稿以防万一），决定新建一个文件。
+    # 这里的 os.path.splitext() 就像是一把“精准的手术刀”。
+    # 它专门用来把文件路径里的**“名字”和“后缀名（扩展名）”**一刀切开
+    # new_md_path_str = "D:/project/output/hak180产品安全手册/hak180产品安全手册_new.md"
     new_md_path_str = os.path.splitext(md_path_obj)[0] + "_new.md"
-
+    #当以 "w" 模式打开一个文件时，如果这个文件不存在，系统会立刻凭空创建一个空白文件；
+    # 如果已经存在，系统会极其无情地把里面原来的内容全部清空
     with open(new_md_path_str, "w", encoding="utf-8") as f:
+        # 就像是打印机一样，把内存里那段已经排版完美、带有 MinIO 链接和 AI 总结文本，刻录进硬盘
         f.write(new_md_content)
     logger.info(f"已经完成了新内容的写入，新的地址为:{new_md_path_str}")
     return new_md_path_str
@@ -426,7 +473,7 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
     #         响应： [(图片名,图片地址,(上文,下文))]
     # 3. 进行图片内容的总结和处理 （视觉模型）
     # 参数： 第二次的响应 [(图片名,图片地址,(上文,下文))]   || md文件的名称（提示词中 md文件名就是存储图片images的文件名）
-    # 响应： {图片名:总结,......}
+    # 响应： {图片名:总结,图片名:总结,图片名:总结}
     summaries = step_3_generate_img_summaries(targets, md_path_obj.stem)
     # 4. 上传图片到minio同时替换md中的图片 （描述 + url地址）
     #         参数：minio_client || {图片名:总结,......} || [(图片名,图片地址,(上文,下文))] (minio) || md_content 旧 || md文件的名称（提示词中 md文件名就是存储图片images的文件名）
@@ -437,7 +484,7 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
     # 5. 新的md内容替换和保存修改装
     #  参数：new_md_content , 原md地址 -》 xx.md -> xx_new.md
     #  响应：新的md的地址 new_md_path
-    #  state[md_path] = new_new_md_path
+    #  state[md_path] = new_md_path_str
     new_md_file_path = step_5_replace_md_and_save(new_md_content, md_path_obj)
     #  md_path -> 新的地址
     #  md_content -> 新的内容
