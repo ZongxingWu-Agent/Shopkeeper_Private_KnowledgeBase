@@ -13,7 +13,7 @@ from minio.deleteobjects import DeleteObject
 # 【核心改造1：移除原生OpenAI，导入LangChain工具类和多模态消息模块】
 from app.clients.minio_utils import get_minio_client
 from app.import_process.agent.state import ImportGraphState
-from app.utils.task_utils import add_running_task
+from app.utils.task_utils import add_running_task, add_done_task
 # LLM客户端工具类（核心复用，替换原生OpenAI调用）
 from app.lm.lm_utils import get_llm_client
 # LangChain多模态依赖（消息构造+异常捕获）
@@ -29,7 +29,8 @@ from app.utils.rate_limit_utils import apply_api_rate_limit
 # 提示词加载工具
 from app.core.load_prompt import load_prompt
 
-
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 """
   主要目标： 将md中图片进行单独处理，方便后去模型识别图片的含义！
@@ -136,26 +137,33 @@ def find_image_in_md_content(md_content, image_file, context_length: int = 100):
     # 给个模版（通缉令）
     pattern = re.compile(r"!\[.*?\]\(.*?" + image_file + ".*?\)")
 
-    results = []  # 存储图片多处使用，上下文不同 ！ 本次暴力处理，获取第一个！
+    # results = []  # 存储图片多处使用，上下文不同 ！ 本次暴力处理，获取第一个！
+    content = None
     # 查询符合位置
     # 拿着模版去md_content中找出现的位置
     # 注意：finditer不会找到一个就停下，此处写死只要第一个
     # pattern.finditer->执行结果： 它找到了两个目标，排成了队伍交给 for 循环：
          # 1号目标：![大猫](cat.png)
          # 2号目标：![小猫](cat.png)
-    for item in pattern.finditer(md_content):
+    items = list(pattern.finditer(md_content))
+    if not items:
+        return None
+    # for item in pattern.finditer(md_content):
+    if item := items[0]:
         start, end = item.span()  # span获取匹配对象的起始和终止的位置
         # 截取上文
         pre_text = md_content[max(start - context_length, 0):start]  # 考虑前面有没有context_length 没有从0开始
         post_text = md_content[end:min(end + context_length, len(md_content))]  # 考虑后面有没有context_length 没有就到长度
         # 截取下文
         # results->列表变成了：[("我看到", "在睡觉。")]
-        results.append((pre_text, post_text))
+        # results.append((pre_text, post_text))
+        content = (pre_text, post_text)
     # 截取位置前后的内容
-    if results:
-        logger.info(f"图片：{image_file} ,在{md_content[:100]}中使用了：{len(results)}次，截取第一个上下文：{results[0]}")
+    if content:
+        # logger.info(f"图片：{image_file} ,在{md_content[:100]}中使用了：{len(results)}次，截取第一个上下文：{results[0]}")
+        logger.info(f"图片：{image_file} ,在{md_content[:100]}，截取第一个上下文：{content}")
         # 返回第一个上下文[("我看到", "在睡觉。")]
-        return results[0]
+        return content
 
 
 def step_2_scan_images(md_content: str, images_dir_obj: Path) -> List[Tuple[str, str, Tuple[str, str]]]:
@@ -191,6 +199,205 @@ def step_2_scan_images(md_content: str, images_dir_obj: Path) -> List[Tuple[str,
     return targets
 
 
+def step_3_generate_img_summaries(targets, stem):
+    """
+    获取图片的内容描述！ 利用视觉模型！
+    :param targets: [(图片名.xxx,图片地址,(上文,下文))，(图片名.xxx,图片地址,(上文,下文))]
+    :param stem:  文件夹的名字  md名称 output / h180xxxx /  h180xxxx.md  | images
+    :return: {图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 , 图片名.xx : 总结和描述 ,图片名.xx : 总结和描述....}
+    """
+    summaries = {} # 最终结果
+    # 循环每一张图片，向视觉模型进行请求，获取总结结果！
+    # 确保一个对类对象就行了！！！
+    request_times = deque()
+    for image_file,image_path, context in  targets:
+        # 解构 图片名 图片地址 (上,下)
+        # 1. 访问限速问题（我们模型的限速标准 1分钟 可以访问10  限制并发访问次数..）
+        apply_api_rate_limit(request_times, max_requests=9)
+        # 2. 向视觉模型发起请求
+        # 2.1 模型对象
+        vm_model = get_llm_client(model=lm_config.lv_model)
+        # 2.2 准备提示词
+        # 加载了提示词模版并格式化了提示词
+        prompt = load_prompt("image_summary",root_folder=stem,image_content=context)
+
+        # import base64
+        with open(image_path, "rb") as f:
+            image_base64 = base64.b64encode(f.read()).decode("utf-8")  # 字节转成字符
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            # 直接放图片的网络地址 "url": "https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241022/emyrja/dog_and_girl.jpeg"
+                            # base64图片转后的字符串  jpg -> image/jpeg
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": f"{prompt}"
+                    },
+                ],
+            },
+        ]
+        # 2.3 执行获取总结
+        response = vm_model.invoke(messages)
+        summary = response.content.strip().replace("\n","")
+        summaries[image_file] = summary
+        logger.info(f"图片：{image_file}，总结结果：{summary}")
+    logger.info(f"总结图片，获取结果：{summaries}")
+    return summaries
+
+
+# def step_3_generate_img_summaries_langchain(targets, stem):
+#     """
+#     使用 LangChain 流水线重构的图片总结函数
+#     """
+#     summaries = {}
+#     request_times = deque()
+#
+#     # 【亮点 1：在循环外，提前搭建好一条固定的“处理流水线”】
+#
+#     # 1. 制造“模具”：定义好包含图片和文字的结构化消息模板
+#     chat_template = ChatPromptTemplate.from_messages([
+#         ("user", [
+#             # 告诉 LangChain 这里有个坑位叫 img_base64，它是一张图片
+#             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,{img_base64}"}},
+#             # 告诉 LangChain 这里有个坑位叫 text_prompt，它是一段文字
+#             {"type": "text", "text": "{text_prompt}"}
+#         ])
+#     ])
+#
+#     # 2. 请出专家
+#     vm_model = get_llm_client(model=lm_config.lv_model)
+#
+#     # 3. 拼装传送带 (LCEL语法)： 模板拼装 -> 交给大模型 -> 自动提取纯文本
+#     # 这里的 `|` 就像水管一样，把三个组件连了起来
+#     chain = chat_template | vm_model | StrOutputParser()
+#
+#     # 开始批量处理物证
+#     for image_file, image_path, context in targets:
+#         apply_api_rate_limit(request_times, max_requests=9)
+#
+#         # 准备材料 1：将图片转为 base64 乱码
+#         with open(image_path, "rb") as f:
+#             image_base64 = base64.b64encode(f.read()).decode("utf-8")
+#
+#         # 准备材料 2：继续使用你们优雅的 load_prompt 加载外部文字话术
+#         text_prompt = load_prompt("image_summary", root_folder=stem, image_content=context)
+#
+#         # 【亮点 2：一键启动流水线】
+#         # 把两样材料作为字典扔进流水线，连 messages 列表都不用自己手写了！
+#         summary = chain.invoke({
+#             "img_base64": image_base64,
+#             "text_prompt": text_prompt
+#         })
+#
+#         # 此时得到的 summary 已经是干净的字符串了，只需要简单去个回车
+#         summary = summary.strip().replace("\n", "")
+#         summaries[image_file] = summary
+#         logger.info(f"图片：{image_file}，总结结果：{summary}")
+#
+#     logger.info(f"总结图片，获取结果：{summaries}")
+#     return summaries
+
+def step_4_upload_images_and_replace_md(summaries, targets, md_content, stem):
+    """
+      将我们图片传递到minio服务器
+      替换原md中的图片和描述
+    :param summaries:  图片名 ： 描述
+    :param targets:  （图片名，原地址，（上，下））
+    :param md_content: 原md内容
+    :param stem: 文件名
+    :return: 新md
+    """
+    # 理解minio存储结果： 桶 / upload-images / 文件夹名字 / 图片对象.jpg
+    minio_client = get_minio_client()
+    # 1.  删除minio中的对应文件的图片
+    # 1.1 获取要删除的对象
+    # Object object_name
+    # 注意：{minio_config.minio_img_dir[1:]}  一定要去掉一个 /
+    object_list = minio_client.list_objects(minio_config.bucket_name,
+                              prefix= f"{minio_config.minio_img_dir[1:]}/{stem}",
+                              recursive=True)
+    # 都有一个对象的名
+    delete_object_list = [DeleteObject(obj.object_name) for obj in object_list]
+    # 需要的DeleteObject
+    # 1.2 调用方法进行删除即可
+    errors = minio_client.remove_objects(minio_config.bucket_name,delete_object_list)
+    for errors in errors:
+        logger.error(f"删除对象失败：{errors}")
+
+    logger.info(f"已经完成{stem}下的对象清空，本次删除了：{len(delete_object_list)}个对象！！！")
+
+    # 2. 上传图片到minio服务器
+    # 声明记录图片上传结果的字典
+    images_url = {}
+    # targets:  （图片名，原地址，（上，下））
+    for image_file,image_path, _ in targets:
+        try:
+            minio_client.fput_object(
+                bucket_name= minio_config.bucket_name,
+                object_name= f"{minio_config.minio_img_dir}/{stem}/{image_file}", # 传入minio 桶后面的命名  xx.png  xx/xxx/xx.png
+                file_path= image_path,
+                content_type="image/jpeg"
+            )
+            # 上传完毕以后记录
+            # 图片地址 = 协议 + 端点 + 桶名 + 对象名  http://47.94.86.115:9000/ 桶名 / 对象名
+            images_url[image_file] = f"http://{minio_config.endpoint}/{minio_config.bucket_name}{minio_config.minio_img_dir}/{stem}/{image_file}"
+            logger.info(f"完成图片{image_file}上传，访问地址为：{images_url[image_file]}")
+        except Exception as e:
+            logger.error(f"上传图片失败：{image_file}，失败原因：{e}")
+    # 3. md中图片的替换即可
+    # summaries = 图片名: 描述
+    # images_url= 图片名：url地址
+    # 汇总： {图片名:(描述,url地址)}
+    image_infos = {}
+    for image_file, summary in summaries.items():
+        if url := images_url.get(image_file):
+            image_infos[image_file] = (summary,url)
+    logger.info(f"图片处理的汇总结果:{image_infos}")
+
+    if image_infos:
+        """
+        xxxx
+        xxx  ![xx](图片地址/image_file) -> ![summary](minio的url)
+        xxx
+        """
+        for image_file, (summary, url) in image_infos.items():
+            # 使用正则
+            # ![](/xxx/xx/image_file) -> ![无所谓](无所谓image_file无所谓)
+            rep = re.compile(r"!\[.*?\]\(.*?"+image_file+".*?\)")
+            md_content = rep.sub(f"![{summary}]({url})", md_content)
+        logger.info(f"已经完成md内容的替换，新的内容为:{md_content}")
+    return md_content
+
+
+def step_5_replace_md_and_save(new_md_content, md_path_obj):
+    """
+    完成新的md的磁盘本分，并且返回老地址！
+    新的命名  xxx_new.md
+    :param new_md_content: 新内容
+    :param md_path_obj: 老地址
+    :return: 新地址
+    """
+    # 设置下新的地址
+    #   c:/xxx/xxx/xxx/xxxx/erdaye.md -> splitext(md_path_obj)[0]
+    #   -》 c:/xxx/xxx/xxx/xxxx/erdaye _new.md
+    new_md_path_str = os.path.splitext(md_path_obj)[0] + "_new.md"
+
+    with open(new_md_path_str, "w", encoding="utf-8") as f:
+        f.write(new_md_content)
+    logger.info(f"已经完成了新内容的写入，新的地址为:{new_md_path_str}")
+    return new_md_path_str
+
+
+
+
 def node_md_img(state: ImportGraphState) -> ImportGraphState:
     """
     节点: 图片处理 (node_md_img)
@@ -213,8 +420,55 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
         logger.info(f">>> [{function_name}]没有图片，直接返回 state ！")
         return state
     # 2. 识别md中使用过的图片，采取做下一步（进行图片总结）
-    # [(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))]
+    # targets->[(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))，(图片名,图片地址,(上文,下文 = 100))]
     targets = step_2_scan_images(md_content, images_dir_obj)
     #         参数： 1. md_content 2. images图片的文件夹地址
     #         响应： [(图片名,图片地址,(上文,下文))]
+    # 3. 进行图片内容的总结和处理 （视觉模型）
+    # 参数： 第二次的响应 [(图片名,图片地址,(上文,下文))]   || md文件的名称（提示词中 md文件名就是存储图片images的文件名）
+    # 响应： {图片名:总结,......}
+    summaries = step_3_generate_img_summaries(targets, md_path_obj.stem)
+    # 4. 上传图片到minio同时替换md中的图片 （描述 + url地址）
+    #         参数：minio_client || {图片名:总结,......} || [(图片名,图片地址,(上文,下文))] (minio) || md_content 旧 || md文件的名称（提示词中 md文件名就是存储图片images的文件名）
+    #         响应：new_md_content
+    #         state[md_content] = new_md_content
+    new_md_content = step_4_upload_images_and_replace_md(summaries, targets, md_content, md_path_obj.stem)
+
+    # 5. 新的md内容替换和保存修改装
+    #  参数：new_md_content , 原md地址 -》 xx.md -> xx_new.md
+    #  响应：新的md的地址 new_md_path
+    #  state[md_path] = new_new_md_path
+    new_md_file_path = step_5_replace_md_and_save(new_md_content, md_path_obj)
+    #  md_path -> 新的地址
+    #  md_content -> 新的内容
+    state["md_path"] = new_md_file_path
+    state["md_content"] = new_md_content
+    logger.info(f">>> [{function_name}]开始结束了！现在的状态为：{state}")
+    add_done_task(state['task_id'], function_name)
     return state
+
+
+if __name__ == "__main__":
+    """本地测试入口：单独运行该文件时，执行MD图片处理全流程测试"""
+    from app.utils.path_util import PROJECT_ROOT
+    logger.info(f"本地测试 - 项目根目录：{PROJECT_ROOT}")
+
+    # 测试MD文件路径（需手动将测试文件放入对应目录）
+    test_md_name = os.path.join(r"output\hak180产品安全手册", "hak180产品安全手册.md")
+    test_md_path = os.path.join(PROJECT_ROOT, test_md_name)
+
+    # 校验测试文件是否存在
+    if not os.path.exists(test_md_path):
+        logger.error(f"本地测试 - 测试文件不存在：{test_md_path}")
+        logger.info("请检查文件路径，或手动将测试MD文件放入项目根目录的output目录下")
+    else:
+        # 构造测试状态对象，模拟流程入参
+        test_state = {
+            "md_path": test_md_path,
+            "task_id": "test_task_123456",
+            "md_content": ""
+        }
+        logger.info("开始本地测试 - MD图片处理全流程")
+        # 执行核心处理流程
+        result_state = node_md_img(test_state)
+        logger.info(f"本地测试完成 - 处理结果状态：{result_state}")
