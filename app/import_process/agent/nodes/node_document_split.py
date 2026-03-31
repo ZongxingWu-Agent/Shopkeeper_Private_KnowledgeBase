@@ -43,18 +43,20 @@ def step_1_get_content(state):
         linux/mac \n
         老mac   \r
     """
+    # 为了防止不同电脑（Windows/Mac/Linux）的换行符（\r\n 或 \r）捣乱，
+    # 代码把它们全部统一替换成了标准的 \n
     md_content = md_content.replace('\r\n', '\n').replace('\r', '\n')
     file_title = state.get("file_title", "default_file")
     return md_content, file_title
 
-
+# 粗切割
 def step_2_split_by_title(md_content, file_title):
     """
     语义切割！
     根据标题进行切割！
     :param md_content:
     :param file_title:
-    :return: [{content,title,file_title}],title_count,len(lines)
+    :return: sections->[{content,title,file_title}] , title_count , len(lines)
     """
 
     """
@@ -88,6 +90,7 @@ def step_2_split_by_title(md_content, file_title):
     # #{1,6} 匹配1-6个 #
     # \s+  + 1->n   #### 标题名
     # .+ .任意字符串 + 1->n   [空格]###[空格]标题描述
+    # 寻找文本里的 Markdown 标题
     title_pattern = r'^\s*#{1,6}\s+.+'
     # 1.2 md_content切割 \n  【】
     lines = md_content.split('\n')
@@ -102,6 +105,7 @@ def step_2_split_by_title(md_content, file_title):
 
     # 2. 循环每行的列表
     for line in lines:
+        # 切掉字符串开头和结尾的空白字符,因为前面有空格会判断失败
         strip_line = line.strip()
         # 2.1 判断代码块状态
         if strip_line.startswith('```') or strip_line.startswith('~~~'):
@@ -165,6 +169,8 @@ def split_long_section(section, max_length):
         text = chunk.strip()  # 切片的内容
         title = f"{section.get('title')}_{index}"
         parent_title = section.get("title")
+        # 这个时候，parent_title 就像是电影名：《指环王》。
+        # 而 part 就像是光盘上的编号：碟1、碟2、碟3
         part = index
         file_title = section.get("file_title")
         sub_sections.append({
@@ -214,7 +220,7 @@ def merge_short_sections(final_sections, min_length):
 
     return merged_sections
 
-
+# 细切割
 def step_3_refine_chunks(sections, max_length, min_length):
     """
     做内容精细切割！
