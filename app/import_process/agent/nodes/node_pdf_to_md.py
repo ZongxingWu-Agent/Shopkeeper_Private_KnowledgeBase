@@ -50,7 +50,7 @@ from app.utils.path_util import PROJECT_ROOT
 
 
 
-
+# （validate：真实，确认）
 def step_1_validate_paths(state):
     """
     进行路径校验！ pdf_path失效 直接异常处理!
@@ -101,11 +101,11 @@ def step_1_validate_paths(state):
     # 当你执行了 pdf_path_obj = Path(pdf_path) 这一步时，就像是你把纸条上的地址，输入到了手机的导航软件里。
     pdf_path_obj = Path(pdf_path) # 将字符串转为 Path 对象
     #local_dir_obj 诞生：Path("D:\My_AI_Project\output")。
-    # 系统去 D盘 看了一眼，发现没有 output 文件夹，于是立刻新建了一个真实的空文件夹。
+    # 系统去 D盘 看了一眼，如果发现没有 output 文件夹，于是立刻新建了一个真实的空文件夹。
     local_dir_obj = Path(local_dir) # 将字符串转为 Path 对象
     if not pdf_path_obj.exists():
-        logger.error(f"[step_1_validate_paths检查发现pdf_path不存在，请检查输入文件路径是否正确！！")
-        raise FileNotFoundError(f"[step_1_validate_paths]检查发现pdf_path不存在，请检查输入文件路径是否正确！！")
+        logger.error(f"[step_1_validate_paths检查发现pdf_path路径下文件不存在，请检查输入文件路径是否正确！！")
+        raise FileNotFoundError(f"[step_1_validate_paths]检查发现pdf_path路径下文件不存在，请检查输入文件路径是否正确！！")
     if not local_dir_obj.exists():
         logger.error(f"[step_1_validate_paths检查发现local_dir不存在，主动创建对应的文件夹！！！")
         # p.exists()：探路小分队。去看看这个文件/文件夹存在吗？返回 True 或 False。
@@ -305,7 +305,7 @@ def node_pdf_to_md(state: ImportGraphState) -> ImportGraphState:
         # 参数：state local_file_path | local_dir
         # 返回：校验后的文件和输出文件夹 Path对象
         #pdf_path_obj：指向你本地电脑上那个需要被解析的原始 PDF 文件
-        pdf_path_obj,local_dir_obj = step_1_validate_paths(state)
+        pdf_path_obj,local_dir_obj = step_1_validate_paths(state)# （validate：真实，确认）
         # 3.调用minerU进行pdf的解析（local_file_path）返回一个下载文件的地址 xx.zip url地址
         # 参数：要解析的pdf文件路径  返回值：要下载的zip文件地址
         #zip_url：平台处理完会返回一个包含 Markdown 文件、图片的压缩包下载地址
