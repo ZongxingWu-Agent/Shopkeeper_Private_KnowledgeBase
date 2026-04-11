@@ -35,10 +35,13 @@ from app.conf.lm_config import lm_config
 from langchain_core.output_parsers import StrOutputParser
 # --- 配置参数 (Configuration) ---
 # 大模型识别商品名称的上下文切片数：取前5个切片，避免上下文过长导致大模型输入超限
+# 规定大模型只需看前 5 个切片即可识别商品名（看多了浪费钱，也容易超出上限）
 DEFAULT_ITEM_NAME_CHUNK_K = 5
 # 单个切片内容截断长度：防止单切片内容过长，占满大模型上下文
+# 规定拼接时，最终送给大模型的文本总长度不能超过 800 字（为了极速响应）
 SINGLE_CHUNK_CONTENT_MAX_LEN = 800
 # 大模型上下文总字符数上限：适配主流大模型输入限制，默认2500
+# 拼接过程中，如果在前 5 个切片中字符数已经达到 2500 字，就强行停止拼接
 CONTEXT_TOTAL_MAX_CHARS = 2500
 
 """
@@ -70,8 +73,9 @@ def step_1_get_chunks(state):
     if not file_title:
         # file_title没有值！
         # md_path中获取文件名即可
+        # 【兜底机制】：如果前面的流程把文件名搞丢了，就去物理路径 md_path 里把文件名抠出来
         file_title = os.path.basename(state.get('md_path'))
-        logger.info(f"file_title确实，获取md_path进行截取！{file_title}")
+        logger.info(f"file_title缺失，获取md_path进行截取！{file_title}")
         state['file_title'] = file_title
     return chunks, file_title
 
@@ -93,21 +97,25 @@ def step_2_build_context(chunks):
     parts = [] # 存储处理后的切片：{1}，标题:{title},内容：{content} \n\n
     total_chars = 0  # 记录已经加入列表的字符串数量
     # 循环处理 content + 判断
+    # 循环前 5 个切片
     for index,chunk in enumerate(chunks[:DEFAULT_ITEM_NAME_CHUNK_K], start=1):
         chunk_title = chunk['title']
         chunk_content = chunk['content']
         # 先处理一下！！
         # if len(chunk_content) + total_chars > SINGLE_CHUNK_CONTENT_MAX_LEN:
         #     chunk_content = chunk_content[:SINGLE_CHUNK_CONTENT_MAX_LEN-total_chars]
+        # 组装格式："切片：1，标题:xxx,内容：xxx"
         data = f"切片：{index}，标题:{chunk_title},内容：{chunk_content}"
         parts.append(data)
         total_chars += len(data)
         # 第一次的content已经超标了但是完成了拼接！！！
+        # 如果总字数超过 2500，立刻停止循环
         if total_chars >= CONTEXT_TOTAL_MAX_CHARS:
             logger.info(f"已经达到最大字符数:{total_chars}，停止拼接！")
             break
     # 结果的转化
     context = "\n\n".join(parts)
+    # 【最后一道防线】：暴力截断，无论如何不准超过 800 个字符
     final_context = context[:SINGLE_CHUNK_CONTENT_MAX_LEN]
     # 返回结果
     return final_context
@@ -121,24 +129,19 @@ def step_3_call_llm(context, file_title):
     :return:
     """
     # 1. 构建提示词
+    # load_prompt内部已经写好了.format()格式化提示词模版的方法，这里的提示词不用再“填空”了。
     human_prompt = load_prompt("item_name_recognition",file_title=file_title,context=context)
     system_prompt = load_prompt("product_recognition_system")
     # 2. 获取模型对象
-    chat_template = ChatPromptTemplate([
+    chat_template = ChatPromptTemplate.from_messages([
         SystemMessage(content=system_prompt),
         HumanMessage(content=human_prompt)
     ]
     )
 
     vm_model = get_llm_client(model=lm_config.lv_model)
-    # llm = get_llm_client(json_mode=False)
 
     chain = chat_template | vm_model
-    # 3. 执行调用
-    # messages = [
-    #     HumanMessage(content=human_prompt),
-    #     SystemMessage(content=system_prompt)
-    # ]
     response = chain.invoke({})
     # response = llm.invoke(messages)
     # 4. 阶段判断和兜底！
@@ -158,7 +161,7 @@ def step_4_update_chunks_and_state(state, item_name, chunks):
     :return:
     """
     state['item_name'] = item_name
-
+    # 【重点】：遍历切片列表，给每一块小肉丁都盖上这个专属商品印章！
     for chunk in chunks:
         chunk['item_name'] = item_name
     state['chunks'] = chunks
@@ -212,9 +215,9 @@ def step_6_save_to_vector_db(file_title, item_name, dense_vector, sparse_vector)
         schema.add_field(field_name="item_name", datatype=DataType.VARCHAR, max_length =65535)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=1024)
         schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
-        # 3.3 查询快，配置索引
-        index_params = milvus_client.prepare_index_params()
 
+        # 3.3 查询块，配置索引
+        index_params = milvus_client.prepare_index_params()
         index_params.add_index(
             field_name="dense_vector",  #给哪个列创建索引 稠密
             index_name="dense_vector_index",  # 索引的名字
@@ -274,6 +277,7 @@ def node_item_name_recognition(state: ImportGraphState) -> ImportGraphState:
     function_name = sys._getframe().f_code.co_name
     logger.info(f">>> [{function_name}]开始执行了！现在的状态为：{state}")
     add_running_task(state['task_id'], function_name)
+
     try:
         # 1. 验和取值 （file_title,chunks）
         # 获取前置的材料！ file_title = 为了兜底，没有item_name

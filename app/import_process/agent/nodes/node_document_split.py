@@ -95,6 +95,7 @@ def step_2_split_by_title(md_content, file_title):
     title_pattern = r'^\s*#{1,6}\s+.+'
     # 1.2 md_content切割 \n
     # 按行把文本拆成一个大列表
+    # todo:字符串操作 -> split('\n') ->"你\n好".split('\n') -> ["你","好"]
     lines = md_content.split('\n')
     # 1.3 定义临时存储变量  current_title = str | current_lines = [] | title_count = 0 存储了多少块
     #                    is_code_block = bool False 是不是代码块
@@ -108,6 +109,7 @@ def step_2_split_by_title(md_content, file_title):
     # 2. 循环每行的列表
     for line in lines:
         # 切掉字符串开头和结尾的空白字符,因为前面有空格会判断失败
+        # todo:字符串操作 -> strip()
         strip_line = line.strip()
         # 【防误切核心逻辑】：如果碰到 ``` 或者 ~~~，说明进入了代码块
         # 代码块里面的注释（比如 # 这是一个循环）很容易被正则误认成标题！
@@ -144,6 +146,7 @@ def step_2_split_by_title(md_content, file_title):
     if current_title:
         sections.append({
             "title": current_title,
+            # 使用 \n 连接 字符串 -> current_lines = ["第一行", "第二行", "第三行"] -> result = "\n".join(current_lines) -> # 结果: "第一行\n第二行\n第三行"
             "content": "\n".join(current_lines),
             "file_title": file_title
         })
@@ -162,16 +165,17 @@ def split_long_section(section, max_length):
         logger.info(f"[split_long_section]:{content}当前chunk长度小于等于{max_length}，不做二次切割！")
         return [section]
     # 3. 超长了，进行二次切割即可
+    # 【引入 LangChain 神器】：递归字符文本分割器
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_length,  # 切割每块的最大长度！ 永远不可能大于这个值！！ 500
         chunk_overlap=100,  # 下次的重叠长度 900   0-500 400-900
-        separators=['\n\n', '\n', '。', '！', "；", " "]  # 切割的符号（什么节点切割）
+        separators=['\n\n', '\n', '。', '！', "；", " "]  # 切割优先级的找茬顺序：先找段落，再找句号，保证不断句
     )
     # title = 标题名  _1 _2 _3 || part 1  2 3   || parent_title = section.title
     sub_sections = []
     for index, chunk in enumerate(splitter.split_text(content), start=1):
         text = chunk.strip()  # 切片的内容
-        title = f"{section.get('title')}_{index}"
+        title = f"{section.get('title')}_{index}" # 新名字：标题_1
         parent_title = section.get("title")
         # 这个时候，parent_title 就像是电影名：《指环王》。
         # 而 part 就像是光盘上的编号：碟1、碟2、碟3
@@ -190,13 +194,14 @@ def split_long_section(section, max_length):
     return sub_sections
 
 
-def merge_short_sections(final_sections, min_length):
+def merge_short_sections(final_sections, min_length, max_length):
     """
     上一次切得太碎！还需要做合并！
        1. content长度要小于 min_length
        2. 同一个parent_title才能合并
     :param final_sections:
     :param min_length:
+    :param max_length:
     :return:
     """
     merged_sections = []  # 存储合并结果
@@ -208,12 +213,21 @@ def merge_short_sections(final_sections, min_length):
             continue
         # 1 (pre_section)-> 2 【判断他的长度 小于 最小值 且 1 2是同一个parent_title】 -> 3 (第二次来)-> 4 -> [5]
         is_pre_short = len(pre_section.get("content")) < min_length
-        # 考虑：没有切割过！ 所以。所有的parent_title = None 这时候 == True
+        # 为什么要and一次：若section没有没有被split_long_section切过，其内没有parent_title参数
         is_same_parent_title = pre_section.get("parent_title") and (
                     pre_section.get("parent_title") == section.get("parent_title"))
-        if is_pre_short and is_same_parent_title:
+
+        # Todo【新增的防御补丁】：模拟合并，看看会不会超载？
+        # 如果在合并碎块时，合并前块1大小没超，块2大小没超，又同父，两个合一起最后大小会超过限制
+        # 499 + 2 (换行符) + 1900 = 2401
+        simulated_length = len(pre_section.get("content")) + 2 + len(section.get("content"))
+        is_merge_safe = simulated_length <= max_length
+
+        # Todo:只有在：前一块很短 AND 同一个爹 AND 合并后不会超载 的情况下，才允许缝合！
+        if is_pre_short and is_same_parent_title and is_merge_safe:
             # 又短 又是同一个parent （合并）
             pre_section["content"] += "\n\n" + section.get("content")
+            # Todo:设计有点bug
             pre_section['part'] = section.get("part")  # 1 <- 2
         else:
             # 不短 或者 不是同一个parent (不合并)
@@ -243,7 +257,9 @@ def step_3_refine_chunks(sections, max_length, min_length):
         # 不行 [{}]
         final_sections.extend(sub_section)
     # 小于的再合并
-    final_sections = merge_short_sections(final_sections, min_length)
+    # split_long_section出来的final_sections中，没有parent_title参数
+    # merge_short_sections出来的final_sections中，有可能有parent_title参数，也可能没有
+    final_sections = merge_short_sections(final_sections, min_length , max_length)
     # 补全属性和参数 part parent_title -> 向量数据库 -》 报错 （split_long_section）
     for section in final_sections:
         section['part'] = section.get('part') or 1
@@ -259,7 +275,9 @@ def step_4_backup_chunks(state, sections):
     :param sections: 要存储的内容 [{}]
     :return:
     """
+    # local_dir："/output/20260404/task_abc123" (字符串)
     local_dir = state.get("local_dir")
+    # backup_file_path = "/output/20260404/task_abc123/chunks.json" (字符串)
     backup_file_path = os.path.join(local_dir, "chunks.json")
     with open(backup_file_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -299,6 +317,7 @@ def node_document_split(state: ImportGraphState) -> ImportGraphState:
         # 大小合适，语义完整的chunks
         # 5. 数据的备份和chunks属性的修改 (chunks -> state  | chunks -> 本地备份一下)
         state['chunks'] = sections
+        # 本地备份
         step_4_backup_chunks(state, sections)
     except Exception as e:
         # 处理异常
@@ -326,7 +345,7 @@ if __name__ == '__main__':
     logger.info(f"本地测试 - 项目根目录：{PROJECT_ROOT}")
 
     # 测试MD文件路径（需手动将测试文件放入对应目录）
-    test_md_name = os.path.join(r"output\hak180产品安全手册", "hak180产品安全手册.md")
+    test_md_name = os.path.join(r"output\hak180使用说明书", "hak180使用说明书.md")
     test_md_path = os.path.join(PROJECT_ROOT, test_md_name)
 
     # 校验测试文件是否存在
