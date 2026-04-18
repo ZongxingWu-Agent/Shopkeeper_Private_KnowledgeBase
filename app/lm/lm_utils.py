@@ -9,8 +9,9 @@ from typing import Optional
 from app.conf.lm_config import lm_config
 from app.core.logger import logger
 
-# 全局缓存：键为(模型名, JSON输出模式)元组，值为ChatOpenAI实例
-# 作用：避免重复初始化客户端，提升性能，统一实例管理
+# 【核心机制】全局缓存字典。
+# 为什么要缓存？因为每次初始化 ChatOpenAI 都要消耗系统资源。
+# 有了这个字典，如果别人已经建好了一个“千问模型”的连接，你直接拿来用就行，不用重复建。
 _llm_client_cache = {}
 
 
@@ -26,34 +27,36 @@ def get_llm_client(model: Optional[str] = None, json_mode: bool = False) -> Chat
     :raise ValueError: 缺失API密钥/基础地址等核心配置
     :raise Exception: 模型初始化失败（LangChain封装层异常）
     """
-    # 1. 确定目标模型（优先级递减，保证模型名非空）
+    # 1. 决定用哪个脑子：如果你传了模型名就用你的，没传就看配置文件，啥都没有就保底用 "qwen3-32b"
     target_model = model or lm_config.llm_model or "qwen3-32b"
-    # 缓存键：模型名+JSON模式，唯一标识不同配置的客户端
+    # 2. 制作取件码：把模型名和是否要JSON格式拼成一个元组，比如 ("qwen3-32b", False)
     cache_key = (target_model, json_mode)
 
-    # 2. 缓存命中：直接返回已初始化的实例，避免重复创建
+    # 3. 查缓存：如果你拿着取件码在缓存池里找到了对应的客户端，直接返回！(极速响应)
     if cache_key in _llm_client_cache:
         logger.debug(f"[LLM客户端] 缓存命中，直接返回实例：模型={target_model}，JSON模式={json_mode}")
         return _llm_client_cache[cache_key]
 
-    # 3. 核心配置校验：拦截缺失的API关键配置，提前抛出明确异常
+    # 4. 安检：如果没有 API Key 或者接口地址，直接报错掀桌子，不往下走了
     if not lm_config.api_key:
         raise ValueError("[LLM客户端] 配置缺失：请在.env中配置OPENAI_API_KEY（大模型API密钥）")
     if not lm_config.base_url:
         raise ValueError("[LLM客户端] 配置缺失：请在.env中配置OPENAI_API_BASE（API接口基础地址）")
     logger.info(f"[LLM客户端] 开始初始化新实例：模型={target_model}，JSON模式={json_mode}")
 
-    # 4. 配置参数组装：区分「国产模型私有参数」和「OpenAI通用参数」
-    # extra_body：千问/即梦等国产模型专属私有参数（LangChain透传至API）
+    # 5. 特殊参数定制
+    # 这是专门给阿里云千问（Qwen）写的补丁。告诉千问：“闭嘴，直接给我答案，不要把你心里推导的过程（thinking）打印出来！”
     extra_body = {"enable_thinking": False}  # 千问专属：关闭思考链输出，减少冗余内容
     # model_kwargs：OpenAI通用参数，所有兼容API均支持
     model_kwargs = {}
+    # 如果调用者要求 json_mode=True，就强制大模型必须返回标准的 JSON 格式，方便代码后续用字典读取
     if json_mode:
         # 开启JSON标准输出模式，强制模型返回可解析的json_object
         model_kwargs["response_format"] = {"type": "json_object"}
         logger.debug(f"[LLM客户端] 已开启JSON输出模式，模型将返回标准JSON结构")
 
     # 5. 客户端初始化：捕获LangChain封装层异常，抛出更友好的提示
+    # 6. 正式连线大模型
     try:
         llm_client = ChatOpenAI(
             model=target_model,  # 目标模型名

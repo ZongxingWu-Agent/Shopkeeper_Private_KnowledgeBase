@@ -166,6 +166,7 @@ def step_4_extract_images_url(state):
        # text -> 正则提取图片
        if text:
            # 正在匹配的所有图片
+           # .findall -> 正则表达式的方法，返回所有匹配到的 URL 列表
            matches = image_reg.findall(text)
            for image_url in matches:
                if image_url not in set_images:

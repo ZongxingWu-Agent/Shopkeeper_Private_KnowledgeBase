@@ -16,11 +16,11 @@ from app.lm.embedding_utils import generate_embeddings
 from app.clients.milvus_utils import get_milvus_client, create_hybrid_search_requests, hybrid_search
 from dotenv import load_dotenv,find_dotenv
 from app.core.logger import logger
-
+from langchain_core.prompts import ChatPromptTemplate
 load_dotenv(find_dotenv())
 
 
-def step_3_llm_item_name_and_rewrite_query(original_query, history_chats):
+def step_1_llm_item_name_and_rewrite_query(original_query, history_chats):
     """
     根据历史记录 -》 识别item_names 和 重写问题
     :param original_query: 用户原有的提问
@@ -30,19 +30,21 @@ def step_3_llm_item_name_and_rewrite_query(original_query, history_chats):
     """
     # 1. 准备提示词
     history_text = ""
+    # 每循环一次，把一条历史拼成大模型能读的文本。
     for chat in history_chats:
         history_text += f"聊天角色：{chat['role']}，回答内容： {chat['text']}，重写问题： {chat['rewritten_query']}，关联主体： {','.join(chat.get('item_names',[]))},时间： {chat['ts']}\n"
 
-    prompt = load_prompt("rewritten_query_and_itemnames",history_text=history_text,query= original_query)
+    # 加载提示词模板并格式化
+    # Todo: 提示词模板
+    prompt = load_prompt("rewritten_query_and_itemnames", history_text=history_text, query=original_query)
     # 2. 模型调用
-    lm_client = get_llm_client(json_mode=True)
-    # system -> 模型的角色边界！ -> 应该是不变！  【角色，规则，格式】
-    # user  ->  每次任务提示 -》 多条动态调整！  【提问/聊天】
-    # 事实上，你嫌麻烦，你可以把模型的角色和边界写到user 功能也是完全一样！！
     messages = [
         HumanMessage(content=prompt)
     ]
+
+    lm_client = get_llm_client(json_mode=True)
     response = lm_client.invoke(messages)
+
     # 怎么确保，模型一定能返回格式化数据？ json!  1.设置json格式化！   2. 提示词中明确   3. 一定要给模型参考示例  4. 做好返回格式的校验
     # 3. 结果解析
     content = response.content
@@ -60,7 +62,7 @@ def step_3_llm_item_name_and_rewrite_query(original_query, history_chats):
     return  dict_content
 
 
-def step_4_query_milvus_item_names(item_names):
+def step_2_query_milvus_item_names(item_names):
     """
      查询向量数据库！ 进行item_name的确定
     :param item_names: 模型提取的item_name可能不准！
@@ -123,7 +125,7 @@ def step_4_query_milvus_item_names(item_names):
     return final_result
 
 
-def step_5_confirmed_and_optional_item_name(query_milvus_results):
+def step_3_confirmed_and_optional_item_name(query_milvus_results):
     """
     通过向量数据库查询的item_name,根据分数归纳出确定和可选的item_name列表
     :param query_milvus_results: 元数据 [{extracted:item_name,matches:[{item_name: , score:},{}]}
@@ -189,9 +191,11 @@ def step_5_confirmed_and_optional_item_name(query_milvus_results):
     return result
 
 
-def step_6_deal_list(state,item_results, history_chats,rewritten_query):
+def step_4_deal_list(state,item_results, history_chats,rewritten_query):
     """
     根据集合类型中数据，判定是否要赋值answer内容
+    :param rewritten_query:
+    :param state:
     :param item_results:   # result = {
         #         "confirmed_item_names":list(set(confirmed_item_names)),
         #         "options_item_names":list(set(options_item_names))
@@ -262,7 +266,7 @@ def node_item_name_confirm(state):
        3. 去掉口语和冗余  同学们 同志们  为啥 咋弄 完犊子了 
        4. 润色问题增加召回率  模型查询的时候也会更精准
     """
-    item_names_and_rewritten_query = step_3_llm_item_name_and_rewrite_query(state["original_query"],history_chats)
+    item_names_and_rewritten_query = step_1_llm_item_name_and_rewrite_query(state["original_query"],history_chats)
     item_names = item_names_and_rewritten_query.get("item_names",[])
     rewritten_query = item_names_and_rewritten_query.get("rewritten_query","")
     item_results = {}
@@ -274,7 +278,7 @@ def node_item_name_confirm(state):
         #      [ { extracted:（模型提取的item_name）, matches:[{item_name:名字,score:0.8},{item_name:名字,score:0.8}]  }，
     #            { extracted:（模型提取的item_name）, matches:[{item_name:名字,score:0.8},{item_name:名字,score:0.8}]  }，
     #          ]
-        query_milvus_results = step_4_query_milvus_item_names(item_names)
+        query_milvus_results = step_2_query_milvus_item_names(item_names)
         # 5. 查询结果进行处理 区分 确定的item_name 以及可选的item_name  -》  没有对应的item_name
         # 参数： query_milvus_results
         # 返回： {确定item_name:[x,x,x,x,x] ,可选的item_name:[x,x,x,x,x]}
@@ -282,11 +286,11 @@ def node_item_name_confirm(state):
         #         "confirmed_item_names":list(set(confirmed_item_names)),
         #         "options_item_names":list(set(options_item_names))
         #     }
-        item_results = step_5_confirmed_and_optional_item_name(query_milvus_results)
+        item_results = step_3_confirmed_and_optional_item_name(query_milvus_results)
 
     #6. 根据item_name确定的集合进行用户反馈结果的处理 -》 answer赋值结果
     # 参数： item_results （两个集合） || 修改历史聊天记录对应item_names history_chats
-    state = step_6_deal_list(state,item_results,history_chats,rewritten_query)
+    state = step_4_deal_list(state,item_results,history_chats,rewritten_query)
     #7. 记录本次的聊天对话 （answer回答）
     save_chat_message(
         session_id=state["session_id"],

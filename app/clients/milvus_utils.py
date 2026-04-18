@@ -171,7 +171,7 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
     :return: 混合搜索结果列表，搜索失败返回None
     """
     try:
-        # 初始化加权排名器：按权重融合稠密/稀疏向量的搜索结果
+        # 初始化！！！加权排名器！！！：按权重融合稠密/稀疏向量的搜索结果
         # norm_score=True：先将两个向量评分归一化到0~1区间，再加权计算
         rerank = WeightedRanker(ranker_weights[0], ranker_weights[1], norm_score=norm_score)
 

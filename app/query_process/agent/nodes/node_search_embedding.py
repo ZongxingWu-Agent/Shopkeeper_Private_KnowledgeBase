@@ -53,12 +53,15 @@ def node_search_embedding(state):
        [
        
          [
-            {id ,
-            distance，
-            entity:
-               {
-                  "chunk_id", "content","file_title", "title", "parent_title", "item_name"
-               }
+            {
+             id ,
+             distance，
+             entity:
+                {
+                "chunk_id", "content","file_title", "title", "parent_title", "item_name"
+                }
+            },
+            
          ]
        ]
     
@@ -76,8 +79,8 @@ if __name__ == "__main__":
     # 模拟测试数据
     test_state = {
         "session_id": "test_search_embedding_001",
-        "rewritten_query": "HAK 180 烫金机使用说明",  # 模拟改写后的查询
-        "item_names": ["HAK 180 烫金机"],  # 模拟已确认的商品名
+        "rewritten_query": "hak180使用说明",  # 模拟改写后的查询
+        "item_names": ["HAK 180"],  # 模拟已确认的商品名
         "is_stream": False
     }
 

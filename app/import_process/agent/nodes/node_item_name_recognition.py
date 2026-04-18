@@ -114,6 +114,10 @@ def step_2_build_context(chunks):
             logger.info(f"已经达到最大字符数:{total_chars}，停止拼接！")
             break
     # 结果的转化
+    # todo: .join 拼接
+    # Todo: 看到字符串后面跟着 .join() 👉 拼字符串;
+    #       看到 os.path 后面跟着 .join() 👉 拼文件路径
+    #       看到多线程/进程对象后面跟着 .join() 👉 死等它运行结束
     context = "\n\n".join(parts)
     # 【最后一道防线】：暴力截断，无论如何不准超过 800 个字符
     final_context = context[:SINGLE_CHUNK_CONTENT_MAX_LEN]
@@ -133,17 +137,13 @@ def step_3_call_llm(context, file_title):
     human_prompt = load_prompt("item_name_recognition",file_title=file_title,context=context)
     system_prompt = load_prompt("product_recognition_system")
     # 2. 获取模型对象
-    chat_template = ChatPromptTemplate.from_messages([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_prompt)
+    llm = get_llm_client(json_mode=False)
+    # 3. 执行调用
+    messages = [
+        HumanMessage(content=human_prompt),
+        SystemMessage(content=system_prompt)
     ]
-    )
-
-    vm_model = get_llm_client(model=lm_config.lv_model)
-
-    chain = chat_template | vm_model
-    response = chain.invoke({})
-    # response = llm.invoke(messages)
+    response = llm.invoke(messages)
     # 4. 阶段判断和兜底！
     item_name = response.content
     if not item_name:

@@ -8,7 +8,7 @@ from app.core.logger import  logger
 
 from app.conf.bailian_mcp_config import mcp_config
 from app.utils.task_utils import add_running_task,add_done_task
-
+from dotenv import load_dotenv
 DASHSCOPE_BASE_URL_STREAMABLE = mcp_config.mcp_base_url
 DASHSCOPE_API_KEY = mcp_config.api_key
 
@@ -90,7 +90,7 @@ def node_web_search_mcp(state):
     }
 
 
-from dotenv import load_dotenv
+
 
 if __name__ == '__main__':
     load_dotenv()

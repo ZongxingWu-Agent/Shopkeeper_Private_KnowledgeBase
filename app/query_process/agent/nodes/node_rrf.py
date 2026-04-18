@@ -7,6 +7,7 @@ from app.core.logger import logger
 def step_3_reciprocal_rank_fusion(source_with_weight,top_k:int =5):
     """
     进行同源数据排名+权重处理
+    :param top_k:
     :param source_with_weight:  [(集合,权重),(集合,权重)]
     :return: [{},{},{}]
     """
@@ -31,6 +32,8 @@ def step_3_reciprocal_rank_fusion(source_with_weight,top_k:int =5):
             # 计算得分 rrf权重版本的公式 = 1/k + rank * weight
             score_dict[chunk_id] = score_dict.get(chunk_id,0.0) + (1.0/(60 + rank)) * weight
             # chunk_dict[chunk_id] = chunk  # 1 -  覆盖 《- 1  保留一份
+            #如果 chunk_id 不存在于 chunk_dict 字典中,则将 chunk_id 作为键,chunk 作为值添加到字典中
+#            如果 chunk_id 已经存在于字典中,则不做任何操作,保留原有的值
             chunk_dict.setdefault(chunk_id,chunk) # 没有的时候才会添加 1  - 失败 《 - 1
             # 效果上没有区别！ 每个chunk值保留一遍！
     # 4. 分和chunk的融合+排序
